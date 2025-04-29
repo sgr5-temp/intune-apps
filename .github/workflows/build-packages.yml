@@ -1,0 +1,131 @@
+name: Build & Release IntuneWin package
+
+on:
+  push:
+    paths:
+      - 'apps/**'
+      - 'scripts/Build-And-UpdateReadme.ps1'
+      - '.github/workflows/build-packages.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Zoek gewijzigde apps
+        id: appdir
+        run: |
+          $diff = git diff --name-only ${{ github.sha }} ${{ github.sha }}~1
+          $apps = $diff | Select-String '^apps/([^/]+)/' | ForEach-Object { $_.Matches.Groups[1].Value } | Sort-Object -Unique
+          if (-not $apps) { Write-Error "Geen wijziging in apps gedetecteerd"; exit 1 }
+          "appname=$($apps[0])" | Out-File -Append $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Build intunewin package + update README.md
+        id: build
+        run: |
+          $appdir = "apps/${{ steps.appdir.outputs.appname }}"
+          $result = .\scripts\Build-And-UpdateReadme.ps1 -AppPath $appdir -BuildIntuneWin
+          $outlines = ($result | Out-String) -split "`n"
+          foreach ($line in $outLines) {
+            if ($line -like "*::set-output*") {
+              $parts = $line -replace "::set-output name=", "" -split "::"
+              Write-Host "$($parts[0])=$($parts[1])"
+              "::set-output name=$($parts[0])::$($parts[1])"
+            }
+          }
+      
+      - name: Create or update GitHub release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: '${{ steps.appdir.outputs.appname }}-v${{ steps.build.outputs.app_version }}'
+          name: '${{ steps.appdir.outputs.appname }} v${{ steps.build.outputs.app_version }}'
+          draft: false
+          prerelease: false
+          files: apps/${{ steps.appdir.outputs.appname }}/build/*.intunewin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Update README.md met definitieve downloadlink
+        run: |
+          $appdir = "apps/${{ steps.appdir.outputs.appname }}"
+          $ver = "${{ steps.build.outputs.app_version }}"
+          $release_url = "https://github.com/${{ github.repository }}/releases/download/${{ steps.appdir.outputs.appname }}-v$ver/${{ steps.build.outputs.package_name }}"
+          # Lees bestaande REAMDE in, vervang de downloadregel
+          $readme = Get-Content "$appdir/README.md" -Raw
+          pattern = "(?ms)(\*\*Laatste intunewin package:\*\* ).*?(\r?\n)"
+          $newreadme = [regex]::Replace($readme, $pattern, "`$1`$release_url`$2")
+          Set-Content "$appdir/README.md" $newreadme -Encoding UTF8
+
+      - name: Commit en push gewijzigde README.md (indien aangepast)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/${{ steps.appdir.outputs.appname }}/README.md
+          git diff --cached --quiet || git commit -m "README.md: update downloadlink na release [skip ci]"
+          git push
+
+      # Later te testen, momenteel niet in gebruik: Push naar intune omgeving
+
+      # - name: Install IntuneWin32App module
+      #   run: |
+      #     Install-Module IntuneWin32App -Scope CurrentUser -Force -AllowClobber
+      
+      # - name: Deploy naar intune win32-app
+      #   env:
+      #     CLIENT_ID: ${{ secrets.INTUNE_CLIENT_ID }}
+      #     TENANT_ID: ${{ secrets.INTUNE_TENANT_ID }}
+      #     CLIENT_SECRET: ${{ secrets.INTUNE_CLIENT_SECRET }}
+      #   run: |
+      #     $ErrorActionPreference = "Stop"
+      #     $appdir = "apps/${{ steps.appdir.outputs.appname }}"
+      #     $metaPath = "$appdir/app-meta.json"
+      #     $meta = Get-Content $metaPath | ConvertFrom-Json
+
+      #     $iconPath = if ($meta.icon) { Join-Path $appdir $meta.icon } else { $null }
+      #     if ($iconPath -and -not (Test-Path $iconPath)) { $iconPath = $null }
+
+      #     # Authenticatie
+      #     Import-Module IntuneWin32App
+      #     $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
+      #     $creds = New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, $secureSecret)
+      #     Connect-MSGraph -ClientId $env:CLIENT_ID -TenantId $env:TENANT_ID -ClientSecret $env:CLIENT_SECRET
+
+      #     # Build detectie block
+      #     $detection = $meta.detection
+      #     $detectionRule = $null
+      #     if ($null -ne $detection -and $detection.type -eq 'File') {
+      #       $filePath = Split-Path $detection.path
+      #       $fileName = Split-Path $detection.path -Leaf
+      #       $detectionRule = @{
+      #         DetectionType = "File"
+      #         Path = $filePath
+      #         FileOrFolder = $fileName
+      #         DetectionMethod = "Exists"
+      #       }
+      #     }
+      #     # Add more logic here if you want to support other detection types (Registry, etc.)
+
+      #     # Deploy Win32 app
+      #     $package = Get-ChildItem "$appdir/build" -Filter *.intunewin | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+      #     Add-IntuneWin32App `
+      #       -FilePath $package.FullName `
+      #       -DisplayName $meta.displayName `
+      #       -Description $meta.description `
+      #       -Publisher $meta.publisher `
+      #       -InstallCommandLine ("powershell.exe -ExecutionPolicy Bypass -File " + $meta.installScript) `
+      #       -UninstallCommandLine $meta.uninstallCommand `
+      #       -DetectionRule $detectionRule `
+      #       -Icon $iconPath `
+      #       -Force
+
+      #     Disconnect-MSIntuneGraph

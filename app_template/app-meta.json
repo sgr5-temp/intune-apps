@@ -1,0 +1,14 @@
+{
+    "displayName": "VLC Player",
+    "publisher": "VideoLAN",
+    "instructions": "Wordt automatisch via Intune Win32 deployed met PSADT.",
+    "installScript": "install.ps1",
+    "uninstallCommand": "powershell.exe -ExecutionPolicy Bypass -File uninstall.ps1",
+    "detection": {
+      "type": "File",
+      "path": "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+      "exists": true
+    },
+    "description": "VLC Player voor Windows, uitgerold met PSADT.",
+    "icon": "icon.png"
+  }
